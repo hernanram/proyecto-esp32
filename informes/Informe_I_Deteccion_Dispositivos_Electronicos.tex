@@ -1,0 +1,387 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[spanish,es-nodecimaldot]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\geometry{top=2.3cm,bottom=2.3cm,left=2.5cm,right=2.5cm}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx,booktabs,longtable,tabularx,array}
+\usepackage{hyperref,xcolor,enumitem,fancyhdr}
+\hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
+\renewcommand{\contentsname}{Índice general}
+\renewcommand{\listtablename}{Índice de tablas}
+\setlist{nosep,leftmargin=*}
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\footnotesize UNSAAC -- Sistemas Embebidos e IoT}
+\rhead{\footnotesize Informe I: detección de dispositivos}
+\cfoot{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\title{\textbf{\Large UNIVERSIDAD NACIONAL DE SAN ANTONIO ABAD DEL CUSCO}\\[0.3cm]
+\large Departamento Académico de Ingeniería Informática y Sistemas\\[1.2cm]
+\textbf{\LARGE INFORME TÉCNICO I}\\[0.25cm]
+\textbf{\Large Sistema de Detección Pasiva de Dispositivos Electrónicos}\\[0.25cm]
+\large Wi-Fi promiscuo, Bluetooth Low Energy y arquitectura AWS IoT}
+\author{\textbf{Autor:} Proyecto integrado UNSAAC\\
+\textbf{Asignatura:} Sistemas Embebidos e Internet de las Cosas}
+\date{20 de noviembre de 2026}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+\begin{abstract}
+El presente informe documenta el diseño y funcionamiento de un sistema embebido basado en ESP32 para detectar dispositivos electrónicos mediante la observación pasiva de tramas Wi-Fi y advertencias Bluetooth Low Energy. El sistema registra direcciones MAC, RSSI, fabricante probable, longitud de trama, canal, distancia estimada y zona de proximidad. Los datos se filtran localmente mediante un filtro escalar de Kalman y se publican por MQTT sobre TLS hacia AWS IoT Core, una función Lambda y DynamoDB. El panel web presenta el estado mediante tablas y un radar de proximidad.
+
+Las clasificaciones por fabricante, OUI y tipo de equipo son probabilísticas. La aleatorización de direcciones MAC, el desvanecimiento por multitrayecto, las reflexiones y los obstáculos impiden garantizar la identidad exacta de un dispositivo o una distancia determinista. Por ello, el sistema debe presentarse como una herramienta de detección y proximidad aproximada, no como un sistema de seguimiento individual ni de identificación forense.
+\end{abstract}
+\clearpage
+\phantomsection
+\tableofcontents
+\clearpage
+\phantomsection
+\listoftables
+\clearpage
+
+\section{Introducción}
+El uso masivo de redes inalámbricas permite detectar presencia tecnológica mediante emisiones transmitidas por equipos cercanos. La propuesta evita establecer una asociación lógica con cada dispositivo. El ESP32 recibe tramas disponibles en el canal Wi-Fi y escanea advertencias BLE. Esta estrategia permite construir una representación ambiental de equipos activos sin requerir una aplicación instalada en los equipos detectados.
+
+La aplicación integra dos tecnologías de 2.4 GHz. Wi-Fi ofrece tramas más frecuentes y permite identificar una MAC, una clasificación OUI o una huella de trama. BLE aporta advertencias de accesorios, teléfonos y audífonos. Ambas señales se procesan por fases temporales para evitar interferencia interna entre el modo promiscuo y el escaneo BLE.
+
+\subsection{Problema identificado}
+En interiores no existe una correspondencia estable entre RSSI y distancia. Una misma potencia recibida puede estar asociada a distancias diferentes debido a paredes, personas, muebles metálicos y multitrayecto. Además, la MAC puede cambiar periódicamente, por lo que una dirección observada no representa necesariamente una identidad permanente.
+
+\subsection{Objetivos}
+\subsubsection{Objetivo general}
+Diseñar y documentar un sistema basado en ESP32 que detecte y clasifique de manera aproximada dispositivos Wi-Fi y BLE mediante sensado pasivo y visualice los resultados mediante AWS y una interfaz web.
+
+\subsubsection{Objetivos específicos}
+\begin{enumerate}
+\item Capturar tramas Wi-Fi en modo promiscuo en los canales 1 a 13.
+\item Detectar advertencias BLE activas e identificar audífonos conocidos.
+\item Clasificar el fabricante probable a partir de OUI y Elementos de Información disponibles.
+\item Filtrar RSSI mediante un filtro escalar de Kalman.
+\item Estimar distancia relativa y asignar una zona de proximidad.
+\item Publicar el estado mediante MQTT TLS en AWS IoT Core.
+\item Guardar el estado en DynamoDB y mostrarlo en un dashboard.
+\item Documentar las limitaciones físicas, éticas y metodológicas.
+\end{enumerate}
+
+\subsection{Hipótesis de trabajo}
+La combinación de captura pasiva, filtrado de RSSI y clasificación por fabricante permite obtener una representación aproximada de dispositivos cercanos. La hipótesis no asegura detección exacta ni ubicación geométrica; la precisión debe medirse en campo con verdad terreno.
+
+\subsection{Alcance}
+El sistema comprende la adquisición con ESP32, el procesamiento local, el transporte cloud y la visualización. No comprende triangulación física con múltiples receptores, dirección de llegada, huella RF individual validada ni desaleatorización completa de todas las MAC modernas.
+
+\section{Antecedentes científicos}
+\subsection{Conteo y detección mediante Probe Requests}
+Salice et al. (2024) emplearon ESP32 en modo promiscuo para estimar ocupación mediante tramas Probe Request. Filtraron RSSI, contaron direcciones únicas en ventanas temporales y ajustaron modelos de densidad. Los autores observaron que un entorno universitario puede contener 1.5 a 2 equipos por persona y utilizaron ventanas cercanas a 30 y 45 segundos. Este resultado demuestra la factibilidad de sensado pasivo con bajo costo, pero no valida clasificación exacta de celulares, laptops o tablets.
+
+\subsection{Desaleatorización semántica mediante Elementos de Información}
+Chaaben et al. (2025) estudiaron direcciones MAC aleatorias utilizando PCAP, atributos semánticos y agrupamiento no supervisado. En su evaluación, los Elementos de Información 45, 127 y 221 concentraron una parte importante del poder discriminativo. También utilizaron distancia de Hamming normalizada y demostraron que el número de secuencia y RSSI no son suficientes para asociar todas las apariciones.
+
+\subsection{Estimación BLE de distancia}
+Al-Maktary et al. (2025) evaluaron distancias RSSI--BLE con ESP32 en espacios interiores. En línea de vista encontraron mayor confiabilidad hasta aproximadamente cuatro metros. Más allá, RSSI presentó divergencia y pérdida de paquetes. Las paredes produjeron atenuaciones adicionales y errores grandes. Esta evidencia fundamenta límites conservadores en la visualización de distancia.
+
+\subsection{Fusión Wi-Fi y BLE}
+Beigi y Shah-Mansouri (2023) combinaron Wi-Fi y BLE para localizar un dispositivo mediante Kalman, KNN y una etapa temporal basada en red neuronal. Los resultados evidencian la utilidad de la fusión, pero corresponden a un problema de localización individual, no a conteo masivo ni clasificación de todos los equipos presentes.
+
+\subsection{Detección por emanaciones electromagnéticas}
+Sun et al. (2025) utilizaron equipos SDR para detectar emisiones involuntarias de circuitos electrónicos. Alcanzaron detección entre 95\% y 98\% dentro de sus escenarios. Sin embargo, esta técnica requiere hardware de mayor ancho de banda y no puede afirmarse que un ESP32 convencional procesará la misma clase de señales.
+
+\subsection{Identidad física y MAC}
+Zanna (2022) mostró que la identidad inalámbrica no puede basarse únicamente en MAC y RSSI. Martin et al. (2017) describieron cómo la aleatorización puede fallar o cambiar en distintos estados del sistema móvil. Estos resultados son especialmente relevantes para evitar afirmaciones de seguimiento persistente.
+
+\begin{table}[htbp]
+\centering
+\centering
+\caption{Comparación de antecedentes relevantes}
+\begin{tabularx}{\textwidth}{@{}p{2.7cm}p{2.4cm}p{3.4cm}X@{}}
+\toprule
+Autor & Año & Tecnología & Aporte y limitación \\
+\midrule
+Salice et al. & 2024 & ESP32 + Probe Request & Valida sensado pasivo; no clasifica ni mide distancia exacta. \\
+Chaaben et al. & 2025 & IEs + DBSCAN & Fundamenta asociación semántica; evaluación de PCAP offline. \\
+Al-Maktary et al. & 2025 & ESP32 + BLE RSSI & Evidencia degradación; no valida el recinto actual. \\
+Beigi y Shah-Mansouri & 2023 & Wi-Fi/BLE + Kalman & Mejora localización individual; no conteo masivo. \\
+Sun et al. & 2025 & SDR + emanaciones EM & Alcance técnico superior al ESP32 convencional. \\
+Zanna & 2022 & Huella RF & Limita identidad basada solo en MAC/RSSI. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Marco teórico}
+\subsection{Ondas electromagnéticas y bandas ISM}
+Wi-Fi y BLE operan en gran parte en la banda industrial, científica y médica de 2.4 GHz. La relación frecuencia--longitud de onda es:
+\[
+\lambda=\frac{c}{f}
+\]
+En 2.4 GHz, la longitud de onda es aproximadamente 12.5 cm. Las reflexiones y obstáculos con dimensiones cercanas a esta escala pueden producir interferencia constructiva o destructiva.
+
+\subsection{Modelo de propagación}
+El modelo de pérdida logarítmica usado como aproximación es:
+\[
+RSSI(d)=A-10n\log_{10}(d)
+\]
+donde $A$ es el RSSI estimado a un metro y $n$ es el exponente de pérdida en interiores. Despejando:
+\[
+d=10^{\frac{-A-RSSI}{10n}}
+\]
+El firmware utiliza valores iniciales $A=-45$ dBm y $n=2.7$. La primera medición no fue obtenida por el informe; es una configuración inicial que debe calibrarse en campo.
+
+\subsection{RSSI}
+RSSI representa potencia recibida en dBm. Valores cercanos a cero indican señal fuerte; valores más negativos indican señal débil. RSSI es una métrica relativa de una recepción concreta, no una coordenada absoluta. Una pérdida momentánea puede deberse a movimiento humano, orientación de antena, interferencia o obstrucción.
+
+\subsection{Filtro de Kalman escalar}
+El firmware calcula un estado RSSI filtrado con:
+\[
+P=P+Q
+\]
+\[
+K=\frac{P}{P+R}
+\]
+\[
+x=x+K(z-x)
+\]
+\[
+P=(1-K)P+Q
+\]
+Los parámetros actuales son $Q=0.01$, $R=1.20$. El filtro reduce oscilaciones, pero no corrige de manera independiente cada problema de propagación.
+
+\subsection{Zonas de proximidad}
+\begin{table}[htbp]
+\centering
+\caption{Zonas implementadas por distancia estimada}
+\begin{tabular}{lll}
+\toprule
+Zona & Intervalo & Uso \\
+\midrule
+Inmediato & Menor o igual a 1.5 m & Proximidad muy cercana \\
+Cerca & Mayor a 1.5 m y menor o igual a 4 m & Cercanía relativa \\
+Medio & Mayor a 4 m y menor o igual a 7 m & Distancia intermedia \\
+Lejos & Mayor a 7 m, limitada a 15 m & Lejanía aproximada \\
+\bottomrule
+\end{tabular}
+\end{table}
+Estas zonas son categorizaciones visuales. No representan un perímetro físico certificado.
+
+\subsection{Direcciones MAC aleatorias}
+Una dirección MAC puede ser globalmente administrada o administrada localmente. El firmware verifica el bit local del primer octeto:
+\[
+MAC\ aleatoria=(mac[0]\ \&\ 0x02)\neq 0
+\]
+Si el bit está activo, el sistema utiliza reglas OUI o longitud de trama como apoyo. Si no existe una firma clara, la clasificación se muestra como probable o genérica.
+
+\subsection{OUI y clasificación por fabricante}
+El Organizationally Unique Identifier corresponde a los tres octetos iniciales asignados a fabricantes. Permite inferir el origen probable, pero no garantiza modelo, propietario ni tipo exacto.
+
+El firmware incluye reglas para Apple, Samsung, Xiaomi, Intel, HP, Dell, Lenovo/Motorola, MediaTek, ASUS y Huawei. También clasifica dispositivos aleatorios como celular privado, laptop privada o IoT privado según Vendor OUI, longitud de trama y condiciones observables.
+
+\subsection{Elementos de Información}
+Las tramas Wi-Fi pueden contener elementos TLV con capacidades HT, capacidades extendidas y datos específicos del fabricante. Los IEs permiten una identificación semántica mayor que RSSI o MAC aislados. El proyecto utiliza una extracción limitada y no implementa todavía un agrupamiento DBSCAN completo validado.
+
+\subsection{Bluetooth Low Energy}
+BLE transmite advertencias donde se pueden observar nombre, datos del fabricante, UUID y potencia de señal. El sistema identifica Apple, Sony, Samsung, Bose, Jabra y Xiaomi mediante datos conocidos o palabras clave. También puede clasificar dispositivos genéricos sin confirmación de modelo.
+
+\section{Arquitectura del sistema}
+\subsection{Componentes principales}
+\begin{table}[htbp]
+\centering
+\centering
+\caption{Arquitectura funcional}
+\begin{tabularx}{\textwidth}{@{}p{2.7cm}p{4.1cm}X@{}}
+\toprule
+Componente & Tecnología & Función \\
+\midrule
+ESP32 & SoC Wi-Fi/BLE & Captura, filtrado, clasificación y publicación \\
+AWS IoT Core & MQTT sobre TLS & Transporte seguro de telemetría \\
+IoT Rule & SQL + acción Lambda & Reenvío de mensajes \\
+Lambda & Python 3.12 & Ingesta y API \\
+DynamoDB & Tabla ESP32Scan & Persistencia del último estado \\
+API Gateway & REST & GET /data y POST /adjust \\
+Dashboard & HTML/CSS/JavaScript & Visualización, radar y tablas \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Ciclo temporal}
+El sistema divide su operación en:
+\begin{enumerate}
+\item Fase Wi-Fi: 25 segundos de modo promiscuo y salto de canales.
+\item Fase BLE: 8 segundos de escaneo activo.
+\item Fase Upload: hasta 7 segundos de conexión MQTT y publicación.
+\end{enumerate}
+La separación reduce la coexistencia entre radios y permite preservar fases de adquisición claras.
+
+\subsection{Tabla interna Wi-Fi}
+Cada registro contiene MAC, bit aleatorio, fabricante probable, RSSI crudo, RSSI filtrado, distancia estimada, zona, canal, cantidad de paquetes y tiempos de primera y última observación.
+
+Un dispositivo deja de estar activo después de 60 segundos sin una nueva observación. La tabla admite 40 dispositivos Wi-Fi activos.
+
+\subsection{Tabla interna BLE}
+Cada registro contiene MAC, nombre, tipo, RSSI, condición aleatoria y clasificación de audífono. La tabla admite 20 dispositivos BLE y conserva advertencias por un periodo distinto.
+
+\subsection{JSON publicado}
+El ESP32 publica campos de identidad del dispositivo, fase, canal, memoria disponible, contador de personas, arreglos Wi-Fi y arreglos BLE:
+\begin{verbatim}
+device_id, timestamp, phase, channel, free_heap,
+people, wifi.devices[], ble.devices[]
+\end{verbatim}
+Los datos se publican al tópico \texttt{unsaac/esp32/scan}.
+
+\subsection{Publicación y persistencia}
+Una regla IoT selecciona los mensajes del tópico anterior y ejecuta la función Lambda. La Lambda convierte números para DynamoDB y guarda el estado bajo la clave \texttt{ESP32-UNSAAC-Sniffer}.
+
+\subsection{API}
+API Gateway expone:
+\begin{itemize}
+\item \texttt{GET /data}: obtiene el último estado persistido.
+\item \texttt{POST /adjust}: actualiza el ajuste manual.
+\item \texttt{OPTIONS}: habilita CORS.
+\end{itemize}
+
+\section{Clasificación de equipos}
+\begin{table}[htbp]
+\centering
+\centering
+\caption{Ejemplos de clasificación implementada}
+\begin{tabularx}{\textwidth}{@{}p{3.1cm}p{4.2cm}X@{}}
+\toprule
+Clasificación & Evidencia & Interpretación \\
+\midrule
+Samsung Cel/Tab & OUI reconocido & Probable fabricante y categoría \\
+Apple iPhone/Mac & OUI reconocido & Probable fabricante \\
+Intel Laptop/PC & OUI reconocido & Probable computadora \\
+Smartphone (Privado) & MAC local y longitud de trama & Estimación \\
+Laptop/PC (Privado) & MAC local y trama extensa & Estimación \\
+IoT (Privado) & MAC local sin firma clara & Baja certeza \\
+AirPods o Galaxy Buds & Datos BLE fabricante & Audífono probable \\
+BLE Desconocido & Advertencia genérica & Categoría desconocida \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Radar y visualización}
+El dashboard utiliza las coordenadas angulares generadas por una función hash sobre la MAC para distribuir puntos alrededor del radar. La distancia estimada determina el radio. Los puntos son Wi-Fi o BLE según su color.
+
+La posición visual no es un cálculo de ubicación física. Solo permite comparar dispositivos por categoría y distancia aproximada. El panel también muestra canal activo, ocupación de canales, RSSI, paquetes, zonas y memoria disponible.
+
+\section{Evaluación experimental recomendada}
+\subsection{Evaluación de distancia}
+\begin{enumerate}
+\item Seleccionar un emisor BLE o una baliza Wi-Fi conocida.
+\item Colocar el receptor a 0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0 y 10.0 metros.
+\item Registrar al menos 100 muestras por punto.
+\item Repetir con línea de vista y con una pared.
+\item Aplicar el filtro Kalman y calcular MAE y RMSE.
+\item Ajustar $A$ y $n$ solo para el recinto documentado.
+\end{enumerate}
+
+\subsection{Evaluación de clasificación}
+\begin{enumerate}
+\item Seleccionar equipos conocidos: celular, laptop, impresora, router y audífono.
+\item Registrar OUI visible y MAC aleatoria.
+\item Comparar etiquetas generadas con la clase real.
+\item Calcular precisión, sensibilidad y tasa de falsos positivos.
+\item Mostrar siempre una advertencia de clasificación probable.
+\end{enumerate}
+
+\subsection{Métricas sugeridas}
+\begin{table}[htbp]
+\centering
+\centering
+\caption{Métricas de evaluación}
+\begin{tabularx}{\textwidth}{@{}p{3cm}X@{}}
+\toprule
+Métrica & Uso \\
+\midrule
+MAE & Error medio absoluto de distancia o conteo \\
+RMSE & Magnitud de errores grandes \\
+Precisión & Proporción de clasificaciones positivas correctas \\
+Recall & Dispositivos reales encontrados \\
+F1 & Balance entre precisión y recall \\
+Latencia & Tiempo entre captura y visualización \\
+Pérdida & Mensajes no publicados o almacenados \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Seguridad y privacidad}
+\begin{enumerate}
+\item No incluir certificados privados ni claves en documentos o repositorios públicos.
+\item Utilizar políticas IAM mínimas.
+\item Restringir AWS IoT, DynamoDB y API Gateway.
+\item Evitar publicar MAC completas en capturas públicas.
+\item Informar a personas presentes sobre el sensado pasivo.
+\item Definir retención y eliminación de datos de prueba.
+\item No utilizar el sistema para vigilancia individual.
+\item No presentar RSSI como identificación legal o biométrica.
+\end{enumerate}
+
+\section{Resultados esperados y estado actual}
+El firmware ha demostrado detección real de dispositivos Wi-Fi y BLE en operación local. La API ha entregado datos JSON a la aplicación web y DynamoDB ha almacenado el último estado. Sin embargo, no se cuenta con un protocolo de validación completo que permita declarar precisión de clasificación o distancia.
+
+Por tanto, el informe debe expresar los resultados como:
+\begin{itemize}
+\item ``Dispositivo Wi-Fi detectado''.
+\item ``Fabricante probable''.
+\item ``Distancia aproximada de acuerdo con el modelo calibrado''.
+\item ``Dispositivo BLE identificado por advertencia''.
+\end{itemize}
+No se debe expresar como:
+\begin{itemize}
+\item ``Identidad de persona confirmada''.
+\item ``Posición exacta''.
+\item ``Marca certificada''.
+\end{itemize}
+
+\section{Limitaciones}
+\begin{enumerate}
+\item RSSI depende del canal, orientación y entorno.
+\item MAC aleatorias pueden dividir un equipo en varias apariciones.
+\item BLE no garantiza que una persona lleve el dispositivo.
+\item El ESP32 no implementa SDR ni absorción electromagnética involuntaria.
+\item DBSCAN no está implementado todavía en el firmware.
+\item Una clasificación OUI no identifica modelo exacto.
+\item El modelo no tiene datos de verdad terreno registrados.
+\item El sistema puede detectar equipos externos al recinto.
+\end{enumerate}
+
+\section{Mejoras futuras}
+\begin{enumerate}
+\item Extraer y comparar IEs 45, 127 y 221 de manera completa.
+\item Implementar DBSCAN con distancia de Hamming normalizada.
+\item Calibrar el modelo por espacio y altura del receptor.
+\item Agregar confianza e intervalo de error al dashboard.
+\item Implementar cola offline y deduplicación de mensajes.
+\item Incorporar sellado temporal y identificadores de medición.
+\item Exportar anonimizado y cifrar datos persistidos.
+\item Evaluar consumo, latencia y memoria en operación prolongada.
+\end{enumerate}
+
+\section{Conclusiones}
+\begin{enumerate}
+\item El ESP32 permite observar tramas Wi-Fi y advertencias BLE sin establecer conexión.
+\item El filtro Kalman reduce oscilaciones, aunque no elimina los efectos de la propagación interior.
+\item OUI y IEs permiten inferencias probables, no identidades exactas.
+\item La distancia RSSI debe usarse como rango relativo.
+\item La arquitectura MQTT/IoT/Lambda/DynamoDB permite persistencia y visualización.
+\item La precisión final requiere experimentación controlada con verdad terreno.
+\item El uso responsable exige privacidad, minimización y comunicación clara a los usuarios.
+\end{enumerate}
+
+\section*{Referencias}
+\begin{thebibliography}{99}
+\bibitem{almatary} Al-Maktary, O., Susanto, M., y Mardiana. (2025). \emph{Evaluation of RSSI-based distance estimation with ESP32 BLE modules for indoor asset tracking}. ELKHA, 17(2), 172--179.
+\bibitem{beigi} Beigi, K., y Shah-Mansouri, H. (2023). \emph{An intelligent indoor positioning algorithm based on Wi-Fi and Bluetooth Low Energy}. arXiv:2312.15744.
+\bibitem{chaaben} Chaaben, M., Bouguila, N., y Patterson, Z. (2025). Crowd counting via Wi-Fi probe requests: Integrating feature selection and data generation. IEEE ICSC.
+\bibitem{ester} Ester, M., Kriegel, H.-P., Sander, J., y Xu, X. (1996). A density-based algorithm for discovering clusters in large spatial databases. KDD.
+\bibitem{kalman} Kalman, R. E. (1960). A new approach to linear filtering and prediction problems. \emph{Journal of Basic Engineering}, 82(1), 35--45.
+\bibitem{martin} Martin, J., Mayberry, T., Donahue, C., et al. (2017). A study of MAC address randomization in mobile devices and when it fails. PETS, 2017(4), 365--383.
+\bibitem{salice} Salice, F., et al. (2024). Estimating the people density in restricted spaces using probe requests for Wi-Fi connections. ACM GoodIT.
+\bibitem{sun} Sun, W., Givehchian, H., y Bharadia, D. (2025). Revealing hidden IoT devices through passive detection, fingerprinting, and localization. POPETS.
+\bibitem{zanna} Zanna, P. (2022). \emph{A multi-layer approach to preventing wireless network impersonation attacks}. Tesis doctoral, RMIT University.
+\bibitem{ieee80211} IEEE. (2020). \emph{IEEE Std 802.11-2020}.
+\bibitem{aws} Amazon Web Services. (2026). \emph{AWS IoT Core, API Gateway, Lambda y DynamoDB documentation}.
+\end{thebibliography}
+\end{document}

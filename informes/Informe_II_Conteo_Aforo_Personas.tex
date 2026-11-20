@@ -1,0 +1,417 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[spanish,es-nodecimaldot]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\geometry{top=2.3cm,bottom=2.3cm,left=2.5cm,right=2.5cm}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx,booktabs,longtable,tabularx,array}
+\usepackage{hyperref,xcolor,enumitem,fancyhdr}
+\hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
+\renewcommand{\contentsname}{Índice general}
+\renewcommand{\listtablename}{Índice de tablas}
+\setlist{nosep,leftmargin=*}
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\footnotesize UNSAAC -- Sistemas Embebidos e IoT}
+\rhead{\footnotesize Informe II: conteo y aforo}
+\cfoot{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\title{\textbf{\Large UNIVERSIDAD NACIONAL DE SAN ANTONIO ABAD DEL CUSCO}\\[0.3cm]
+\large Departamento Académico de Ingeniería Informática y Sistemas\\[1.2cm]
+\textbf{\LARGE INFORME TÉCNICO II}\\[0.25cm]
+\textbf{\Large Sistema de Conteo y Aforo Aproximado de Personas}\\[0.25cm]
+\large Dispositivos Wi-Fi/BLE, ajuste manual y arquitectura AWS}
+\author{\textbf{Autor:} Proyecto integrado UNSAAC\\
+\textbf{Asignatura:} Sistemas Embebidos e Internet de las Cosas}
+\date{20 de noviembre de 2026}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+\begin{abstract}
+Este informe describe el módulo de estimación de personas integrado al sistema ESP32. El módulo cuenta dispositivos Wi-Fi activos, dispositivos BLE activos y los convierte a una estimación automática mediante un factor inicial de 1.5 dispositivos por persona, basado en observaciones reportadas en estudios universitarios. Posteriormente aplica un ajuste manual acumulado que permite corregir el resultado desde un dashboard.
+
+El valor obtenido es un aforo aproximado, no una medición exacta de personas. La presencia de varios dispositivos por persona, MAC aleatorias, dispositivos silenciosos, equipos ajenos al recinto y dispositivos BLE fijos producen sobreconteo o subconteo. Por ello, la evaluación requiere verdad terreno y la comunicación académica debe destacar la incertidumbre.
+\end{abstract}
+\clearpage
+\phantomsection
+\tableofcontents
+\clearpage
+\phantomsection
+\listoftables
+\clearpage
+
+\section{Introducción}
+La medición de ocupación mediante sensores puede representar una alternativa no visual a cámaras o contadores físicos. El presente proyecto utiliza señales inalámbricas emitidas por equipos cercanos para estimar cuántas personas podrían estar presentes.
+
+El sistema no detecta una persona directamente. Detecta dispositivos activos y utiliza una relación estadística entre dispositivos y ocupantes. El ajuste manual permite que una persona observadora corrija el valor.
+
+\subsection{Problema}
+No todos los ocupantes llevan un dispositivo activo y no todos los dispositivos pertenecen a personas. Un recinto puede contener routers, impresoras, televisores, sensores IoT o visitantes externos al área. Además, un teléfono puede alternar Wi-Fi y BLE, apareciendo en una o varias fuentes.
+
+\subsection{Objetivos}
+\subsubsection{Objetivo general}
+Diseñar y documentar un sistema aproximado de conteo de personas basado en detección Wi-Fi/BLE, relación estadística de dispositivos y ajuste manual persistente.
+
+\subsubsection{Objetivos específicos}
+\begin{enumerate}
+\item Contar dispositivos Wi-Fi activos mediante expiración temporal.
+\item Contar dispositivos BLE activos durante el escaneo.
+\item Calcular una estimación automática con el factor 1.5.
+\item Permitir corrección manual mediante API.
+\item Persistir el ajuste en DynamoDB.
+\item Publicar el ajuste al ESP32 mediante MQTT.
+\item Mostrar el estado en el dashboard.
+\item Establecer un protocolo de validación.
+\end{enumerate}
+
+\subsection{Hipótesis}
+La cantidad de dispositivos activos puede ser utilizada como indicador indirecto de ocupación en un entorno controlado. La relación no será exacta y debe calibrarse con medición real.
+
+\subsection{Importancia}
+La estimación puede aportar aforo aproximado para aulas, laboratorios, comercios o pequeños eventos. No sustituye sistemas certificados donde se requiere control obligatorio de capacidad.
+
+\section{Antecedentes científicos}
+\subsection{Salice et al. (2024)}
+Salice et al. utilizaron ESP32 en modo promiscuo para observar Probe Requests. Ajustaron modelos de regresión lineal y encontraron una relación entre solicitudes detectadas y densidad observada. En entornos universitarios también documentaron 1.5 a 2 dispositivos por persona.
+
+El presente proyecto adopta el límite inicial de 1.5:
+\[
+P_{auto}=\operatorname{round}\left(\frac{D}{1.5}\right)
+\]
+No se debe presentar 1.5 como constante universal.
+
+\subsection{Aleatorización MAC}
+Los sistemas móviles pueden cambiar frecuentemente la dirección MAC. Esto puede producir sobreconteo si cada dirección se interpreta como un equipo diferente, o fragmentar la asociación temporal de un equipo real.
+
+Una ventana temporal corta reduce el arrastre histórico, pero puede fallar si el dispositivo permanece silencioso durante varios segundos.
+
+\subsection{Fusión Wi-Fi/BLE}
+La combinación de Wi-Fi y BLE puede revelar teléfonos y accesorios cercanos. Sin embargo, la suma directa puede contar el mismo teléfono dos veces. Por ello, el proyecto presenta el sistema como suma de fuentes, no como número individual desduplicado. La mejora futura debe unir tecnologías mediante ventanas temporales o huellas semánticas.
+
+\subsection{DBSCAN y asociación}
+Chaaben et al. estudiaron características semánticas de tramas para asociar MAC aleatorias. Su técnica no está implementada por completo en el firmware actual. La implementación futura podría reducir sobreconteo sin guardar identificadores permanentemente.
+
+\begin{table}[htbp]
+\centering
+\caption{Antecedentes aplicados al conteo}
+\begin{tabularx}{\textwidth}{@{}p{3cm}p{3.5cm}X@{}}
+\toprule
+Autor & Contribución & Aplicación y límite \\
+\midrule
+Salice et al. & Ratio y regresión por Probe Requests & Sustenta el factor inicial 1.5; requiere calibración local \\
+Chaaben et al. & IEs y DBSCAN & Mejora deduplicación futura; no implementada aún \\
+Martin et al. & Fallos de MAC aleatoria & Advierte sobre identidad y privacidad \\
+Beigi y Shah-Mansouri & Fusión Wi-Fi/BLE & Sugiere combinación; no resuelve conteo masivo \\
+Zanna & Riesgos de MAC/RSSI & Evita afirmar identidad individual \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Marco teórico del conteo}
+\subsection{Unidades}
+Se definen:
+\begin{itemize}
+\item $D_{wifi}$: dispositivos Wi-Fi activos.
+\item $D_{ble}$: dispositivos BLE activos.
+\item $D$: total de dispositivos observados.
+\item $P_{auto}$: estimación automática.
+\item $O$: ajuste manual acumulado.
+\item $P_{total}$: valor mostrado al usuario.
+\end{itemize}
+
+\subsection{Número de dispositivos}
+\[
+D=D_{wifi}+D_{ble}
+\]
+Esta suma puede incluir duplicados. La fórmula no representa una cardinalidad de personas.
+
+\subsubsection{Expiración Wi-Fi}
+Un dispositivo Wi-Fi se elimina si no actualiza su último registro durante 60 segundos.
+
+\subsubsection{Expiración BLE}
+Un dispositivo BLE se elimina si no actualiza su última advertencia durante 120 segundos.
+
+\subsection{Ratio dispositivos/persona}
+\[
+P_{auto}=\operatorname{round}\left(\frac{D}{1.5}\right)
+\]
+El redondeo puede devolver cero. El firmware evita cero cuando existe al menos un dispositivo:
+\[
+D>0\Rightarrow P_{auto}\geq 1
+\]
+
+\subsection{Ajuste manual}
+\[
+P_{total}=\max(0,P_{auto}+O)
+\]
+El ajuste $O$ puede ser positivo o negativo y se conserva en DynamoDB.
+
+\section{Diseño del sistema}
+\subsection{Captura de dispositivos}
+El ESP32 alterna entre modo promiscuo Wi-Fi y escaneo BLE. Durante Wi-Fi utiliza salto de canal, clasifica MAC y filtra RSSI. Durante BLE registra advertencias y clasifica nombres o fabricantes.
+
+\subsection{Conteo Wi-Fi}
+\begin{enumerate}
+\item Recibir una trama.
+\item Extraer MAC, RSSI y canal.
+\item Filtrar o actualizar tabla interna.
+\item Reiniciar el tiempo de última observación.
+\item Contar el equipo si sigue dentro del tiempo de expiración.
+\end{enumerate}
+
+\subsection{Conteo BLE}
+\begin{enumerate}
+\item Obtener una advertencia BLE.
+\item Extraer MAC, nombre, tipo y RSSI.
+\item Actualizar la tabla interna.
+\item Reiniciar el tiempo de última observación.
+\item Contar el equipo dentro del periodo de expiración.
+\end{enumerate}
+
+\subsection{Arquitectura AWS}
+\begin{table}[htbp]
+\centering
+\centering
+\caption{Componentes cloud utilizados}
+\begin{tabularx}{\textwidth}{@{}p{3cm}p{4.3cm}X@{}}
+\toprule
+Componente & Configuración & Responsabilidad \\
+\midrule
+ESP32 & MQTT cliente TLS & Captura y publicación \\
+AWS IoT Core & Tópico unsaac/esp32/scan & Recepción MQTT \\
+IoT Rule & SQL + Lambda & Reenvío de telemetría \\
+Lambda & Python 3.12 & Ingesta y ajuste \\
+DynamoDB & Tabla ESP32Scan & Estado persistente \\
+API Gateway & GET /data y POST /adjust & Comunicación web \\
+Dashboard & HTML/CSS/JavaScript & Lectura y corrección \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Flujo automático}
+\begin{enumerate}
+\item Capturar dispositivos.
+\item Calcular el conteo de personas.
+\item Crear el JSON.
+\item Publicar MQTT.
+\item Ejecutar Lambda por regla IoT.
+\item Guardar el estado en DynamoDB.
+\item Consultar la API desde el dashboard.
+\end{enumerate}
+
+\subsection{Flujo de ajuste manual}
+\begin{enumerate}
+\item El usuario presiona $-1$ o $+1$.
+\item El navegador envía \texttt{\{delta:1\}} o \texttt{\{delta:-1\}}.
+\item Lambda suma el delta a \texttt{manual\_offset}.
+\item Lambda recalcula el total con el último conteo automático.
+\item Lambda publica el ajuste al tópico \texttt{unsaac/esp32/adjust}.
+\item El ESP32 recibe el mensaje y modifica su variable local.
+\end{enumerate}
+
+\subsection{Mensajes MQTT}
+\subsubsection{Publicación de escaneo}
+\begin{verbatim}
+unsaac/esp32/scan
+{
+  "device_id": "...",
+  "people": {
+    "wifi_devices": 0,
+    "ble_devices": 0,
+    "auto_estimate": 0,
+    "manual_offset": 0,
+    "total": 0
+  },
+  "wifi": {"devices": []},
+  "ble": {"devices": []}
+}
+\end{verbatim}
+
+\subsubsection{Ajuste manual}
+\begin{verbatim}
+unsaac/esp32/adjust
+{"action":"adjust","delta":1,"new_offset":0}
+\end{verbatim}
+
+\section{Interpretación del resultado}
+\begin{table}[htbp]
+\centering
+\centering
+\caption{Interpretación operativa del aforo estimado}
+\begin{tabularx}{\textwidth}{@{}p{3.2cm}X@{}}
+\toprule
+Resultado & Interpretación \\
+\midrule
+0 personas & Sin dispositivos activos observados o radio apagada \\
+Valor alto & Posible alta ocupación o presencia de equipos fijos \\
+Valor estable & Estabilidad temporal, no exactitud individual \\
+Cambio rápido & Entradas, salidas o variación de radio \\
+Corrección positiva & El ajuste manual reconoce más personas \\
+Corrección negativa & El ajuste manual reduce una sobreestimación \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Riesgos de sobreconteo}
+\subsection{Múltiples equipos por persona}
+Una persona puede llevar celular, reloj, audífonos y laptop. Esta condición aumenta el numerador $D$.
+
+\subsection{Dispositivos ajenos al área}
+Routers, impresoras, televisores o sensores pueden ser observados desde los límites del recinto.
+
+\subsection{MAC aleatorias}
+Un dispositivo puede aparecer con varias direcciones temporales y ser contado varias veces.
+
+\subsection{BLE independiente}
+Un accesorio BLE puede representar un objeto, no una persona.
+
+\subsection{Ventanas largas}
+Una ventana de expiración larga puede conservar equipos ausentes y retrasar la reducción del conteo.
+
+\section{Riesgos de subconteo}
+\subsection{Sin radio activa}
+Wi-Fi o BLE apagado impide la detección.
+
+\subsection{Modo avión o privacidad}
+Algunos equipos permanecen silenciosos.
+
+\subsection{Alcance insuficiente}
+Personas ubicadas fuera de la región efectiva no producen tramas confiables.
+
+\subsection{Ventanas cortas}
+Una expiración demasiado corta puede retirar equipos que emitieron pocas tramas.
+
+\subsection{Silencio temporal}
+Las redes modernas pueden esperar antes de emitir una nueva solicitud.
+
+\section{Protocolo de validación}
+\subsection{Verdadero terreno}
+\begin{enumerate}
+\item Seleccionar un recinto con entradas controladas.
+\item Registrar visualmente la cantidad real.
+\item Realizar sesiones con 0, 5, 10, 15 y 20 personas.
+\item Registrar el número de teléfonos, laptops y accesorios.
+\item Documentar hora, ruido de radio y obstáculos.
+\end{enumerate}
+
+\subsection{Duración de prueba}
+Cada nivel de ocupación puede probarse durante diez minutos. Se recomienda repetir cada condición al menos tres veces.
+
+\subsection{Comparación de modelos}
+\begin{table}[htbp]
+\centering
+\centering
+\caption{Modelos a evaluar}
+\begin{tabularx}{\textwidth}{@{}p{3.4cm}X@{}}
+\toprule
+Modelo & Fórmula o condición \\
+\midrule
+Modelo actual & $P=\max(0,\operatorname{round}(D/1.5)+O)$ \\
+Solo Wi-Fi & $P=\max(0,\operatorname{round}(D_{wifi}/r)+O)$ \\
+Solo BLE & $P=\max(0,\operatorname{round}(D_{ble}/r)+O)$ \\
+Calibrado & $P=\alpha D+\beta+O$ \\
+Ventana móvil & Promedio o mediana de dispositivos por 30/45 segundos \\
+Corroboración & Evaluar Wi-Fi y BLE sin suma directa \\
+\bottomrule
+\end{tabularx}
+\end{table}
+El valor $r$ se determina mediante calibración local.
+
+\subsection{Métricas}
+\[
+MAE=\frac{1}{N}\sum_{i=1}^{N}|P_{real,i}-P_{est,i}|
+\]
+\[
+RMSE=\sqrt{\frac{1}{N}\sum_{i=1}^{N}(P_{real,i}-P_{est,i})^2}
+\]
+\[
+MAPE=\frac{100}{N}\sum_{i=1}^{N}\frac{|P_{real,i}-P_{est,i}|}{P_{real,i}}
+\]
+También se deben calcular el ajuste manual requerido, la latencia del dashboard y la estabilidad entre repeticiones.
+
+\section{Sincronización manual}
+El ajuste manual se almacena en DynamoDB. Si el ESP32 se desconecta, el ajuste puede persistir en la nube y enviarse posteriormente al volver la conexión.
+
+El dashboard representa el valor total usando el nivel superior o el objeto \texttt{people}, según la estructura recibida. El ajuste optimista puede modificar temporalmente la pantalla, pero el servidor es la fuente persistente.
+
+\section{Privacidad y uso responsable}
+\begin{enumerate}
+\item Publicar únicamente datos agregados.
+\item No mostrar MAC completas en capturas públicas.
+\item Definir tiempo de retención.
+\item Informar a usuarios presentes.
+\item Restringir credenciales y permisos.
+\item Evitar perfiles personales.
+\item No utilizar el conteo como sanción o vigilancia.
+\item Registrar cambios de configuración y modelo.
+\end{enumerate}
+
+\section{Validación técnica del despliegue}
+\subsection{Pruebas de API}
+\begin{enumerate}
+\item \texttt{GET /data} devuelve \texttt{200}.
+\item \texttt{POST /adjust} valida delta igual a 1 o -1.
+\item El ajuste modifica \texttt{manual\_offset}.
+\item Lambda publica MQTT.
+\item El ESP32 recibe la suscripción.
+\item DynamoDB conserva el último estado.
+\end{enumerate}
+
+\subsection{Pruebas del ESP32}
+\begin{enumerate}
+\item La fase Wi-Fi detecta equipos.
+\item La fase BLE finaliza y vuelve a upload.
+\item MQTT publica el JSON completo.
+\item La IoT Rule ejecuta Lambda.
+\item Se observan datos en el dashboard.
+\end{enumerate}
+
+\section{Limitaciones}
+\begin{enumerate}
+\item La relación 1.5 no está validada para el recinto actual.
+\item Wi-Fi y BLE pueden representar el mismo equipo.
+\item Los equipos pueden estar apagados o silenciosos.
+\item RSSI no confirma ingreso o permanencia física.
+\item MAC aleatorias fragmentan el conteo.
+\item El sistema no identifica personas individuales.
+\item El ajuste manual depende de observación humana.
+\item La variación horaria puede modificar el radio.
+\end{enumerate}
+
+\section{Mejoras futuras}
+\begin{enumerate}
+\item Entrenar el modelo con datos locales.
+\item Clasificar infraestructura fija.
+\item Implementar una clase de confianza.
+\item Usar deduplicación temporal entre Wi-Fi y BLE.
+\item Mostrar intervalos de error.
+\item Implementar una cola offline.
+\item Agregar control de calidad por RSSI.
+\item Evaluar ventanas de 30 y 45 segundos.
+\item Registrar MAE y RMSE en el dashboard.
+\end{enumerate}
+
+\section{Conclusiones}
+\begin{enumerate}
+\item El sistema estima ocupación mediante dispositivos, no personas directas.
+\item El factor 1.5 es un valor inicial basado en estudios, no una constante universal.
+\item El ajuste manual permite corregir sobreconteo y subconteo visibles.
+\item AWS conserva el estado y permite sincronización con el ESP32.
+\item El sistema requiere calibración y pruebas con verdad terreno.
+\item Debe comunicarse como aforo aproximado.
+\item No se recomienda usar el resultado para decisiones críticas sin un margen explícito.
+\end{enumerate}
+
+\section*{Referencias}
+\begin{thebibliography}{99}
+\bibitem{beigi} Beigi, K., y Shah-Mansouri, H. (2023). \emph{An intelligent indoor positioning algorithm based on Wi-Fi and Bluetooth Low Energy}. arXiv:2312.15744.
+\bibitem{chaaben} Chaaben, M., Bouguila, N., y Patterson, Z. (2025). Crowd counting via Wi-Fi probe requests: Integrating feature selection and data generation. IEEE ICSC.
+\bibitem{martin} Martin, J., Mayberry, T., Donahue, C., et al. (2017). A study of MAC address randomization in mobile devices and when it fails. PETS, 2017(4), 365--383.
+\bibitem{salice} Salice, F., et al. (2024). Estimating the people density in restricted spaces using probe requests for Wi-Fi connections. ACM GoodIT.
+\bibitem{zanna} Zanna, P. (2022). \emph{A multi-layer approach to preventing wireless network impersonation attacks}. Tesis doctoral, RMIT University.
+\bibitem{aws} Amazon Web Services. (2026). \emph{AWS IoT Core, Lambda, DynamoDB y API Gateway documentation}.
+\end{thebibliography}
+\end{document}
