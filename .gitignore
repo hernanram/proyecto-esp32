@@ -1,0 +1,28 @@
+# Secretos locales
+*.pem
+*.key
+*.crt
+.env
+.env.*
+
+# LaTeX
+*.aux
+*.lof
+*.lot
+*.log
+*.out
+*.toc
+*.synctex.gz
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Arduino y editores
+.vscode/
+.pio/
+build/
+*.elf
+*.bin
